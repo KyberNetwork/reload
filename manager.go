@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
@@ -22,6 +23,7 @@ type Manager struct {
 	reloaderGroupByPriority map[int]reloaderGroup
 	notifiers               []Notifier
 	lock                    uint32 // Mutex based on atomic integer.
+	sync.RWMutex
 }
 
 // NewManager returns a new manager.
@@ -43,6 +45,9 @@ func NewManager() Manager {
 //
 // This process will be repeated forever until the manager stops.
 func (m *Manager) RegisterNotifier(n Notifier) {
+	m.Lock()
+	defer m.Unlock()
+
 	m.notifiers = append(m.notifiers, n)
 }
 
@@ -58,6 +63,9 @@ func (m *Manager) RegisterNotifier(n Notifier) {
 //
 // The priority order is ascendant (e.g 0, 42, 100, 250, 999...).
 func (m *Manager) RegisterReloader(priority int, r Reloader) {
+	m.Lock()
+	defer m.Unlock()
+
 	rg, ok := m.reloaderGroupByPriority[priority]
 	if !ok {
 		rg = reloaderGroup{priority: priority}
@@ -82,9 +90,11 @@ type notifierResult struct {
 // If any of the reloaders reload process ends with an error, run will
 // end its execution and return an error.
 func (m *Manager) Run(ctx context.Context) error {
-	signal := make(chan notifierResult, len(m.notifiers))
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // This will stop all running notifiers.
+
+	m.RLock()
+	signal := make(chan notifierResult, len(m.notifiers))
 
 	// Run all notifiers and wait for any of them sends a signal signals.
 	for _, n := range m.notifiers {
@@ -107,6 +117,7 @@ func (m *Manager) Run(ctx context.Context) error {
 			}
 		}(n)
 	}
+	m.RUnlock()
 
 	// Wait until the context ends or we receive a signal from a notifier.
 	for {
